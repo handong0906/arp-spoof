@@ -201,9 +201,9 @@ int main(int argc, char* argv[])
 
         //여기서부터 arp spoofing 패킷 만들기
 
-        //sender1한테 한번 보내놓기
+        //sender1한테 한번 보내놓기(poisoning은 아니지만...)
         send_arp_poisoning(pcap, my_MAC, sender_MAC, my_MAC, pairs[i].target_ip, sender_MAC, pairs[i].sender_ip);
-        //target1한테 한번 보내놓기
+        //target1한테 한번 보내놓기(poisoning은 아니지만...)
         send_arp_poisoning(pcap, my_MAC, target_MAC, my_MAC, pairs[i].sender_ip, target_MAC, pairs[i].target_ip); 
 
         
