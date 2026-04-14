@@ -372,8 +372,8 @@ int main(int argc, char* argv[])
                         //ether 헤더에서 src_MAC을 my_MAC으로, dst_MAC을 target1 MAC으로 갈아끼워서 보내기.
                         memcpy(relay_buf, packet, header->caplen);
                         relay_packet = (EtherIPPacket*) relay_buf;
-                        memcmp(relay_packet->ETHER.ether_srcMAC, my_MAC, 6);
-                        memcmp(relay_packet->ETHER.ether_dstMAC, target_MAC, 6);
+                        memcpy(relay_packet->ETHER.ether_srcMAC, my_MAC, 6);
+                        memcpy(relay_packet->ETHER.ether_dstMAC, target_MAC, 6);
 
                         pcap_sendpacket(pcap, relay_buf, header->caplen);
                         printf("Sent relay packet: sender -> me -> target \n");
@@ -388,8 +388,8 @@ int main(int argc, char* argv[])
                         //ether 헤더에서 src_MAC을 my_MAC으로, dst_MAC을 sender1 MAC으로 갈아끼워서 보내기.
                         memcpy(relay_buf, packet, header->caplen);
                         relay_packet = (EtherIPPacket*) relay_buf;
-                        memcmp(relay_packet->ETHER.ether_srcMAC, my_MAC, 6);
-                        memcmp(relay_packet->ETHER.ether_dstMAC, sender_MAC, 6);
+                        memcpy(relay_packet->ETHER.ether_srcMAC, my_MAC, 6);
+                        memcpy(relay_packet->ETHER.ether_dstMAC, sender_MAC, 6);
 
                         pcap_sendpacket(pcap, relay_buf, header->caplen);
                         printf("Sent relay packet: target -> me -> sender \n");
