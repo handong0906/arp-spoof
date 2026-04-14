@@ -152,8 +152,6 @@ int main(int argc, char* argv[])
                 struct sockaddr_ll *sll = (struct sockaddr_ll *)ifa->ifa_addr;
                 if (sll->sll_halen == 6) { // MAC 주소 길이는 6바이트
                     memcpy(my_MAC, sll->sll_addr, 6);
-                    printf("Success! My MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
-                        my_MAC[0], my_MAC[1], my_MAC[2], my_MAC[3], my_MAC[4], my_MAC[5]);
                 }
             }
 
@@ -195,8 +193,16 @@ int main(int argc, char* argv[])
         
         unsigned char sender_MAC[6];
         unsigned char target_MAC[6];
+        unsigned int check_sendermac = 0;
+        unsigned int check_targetmac = 0;
 		while(1)
         {
+            if((check_sendermac == 1) && (check_targetmac == 1)) 
+            {
+                printf("sendermac and targetmac ready \n");
+                break;
+            }
+
             struct pcap_pkthdr* header;
             const unsigned char* packet;
             
@@ -221,14 +227,14 @@ int main(int argc, char* argv[])
             {
                 if(memcmp(arpreply_packet->ARP.Target_MAC,my_MAC,6) != 0) continue; //ARP 수준에서 arp payload에 담긴 target MAC주소가 내 MAC 주소가 맞다면 통과시키기
                 memcpy(sender_MAC,arpreply_packet->ARP.Sender_MAC,6);
-                printf("am i here? 1 \n");
-                break;
+                check_sendermac = 1;
+                continue;
             } else if(ntohl(arpreply_packet->ARP.Sender_Protocol_Addr) == pairs[i].target_ip)
                 {
                     if(memcmp(arpreply_packet->ARP.Target_MAC,my_MAC,6) != 0) continue;
                     memcpy(target_MAC, arpreply_packet->ARP.Sender_MAC,6);
-                    printf("am i here? 2 \n");
-                    break;
+                    check_targetmac = 1;
+                    continue;
                 }
             
 
@@ -370,7 +376,7 @@ int main(int argc, char* argv[])
                         memcmp(relay_packet->ETHER.ether_dstMAC, target_MAC, 6);
 
                         pcap_sendpacket(pcap, relay_buf, header->caplen);
-                        printf("Sent relay packet: sender -> me -> target");
+                        printf("Sent relay packet: sender -> me -> target \n");
                     }
                 
                     
@@ -386,7 +392,7 @@ int main(int argc, char* argv[])
                         memcmp(relay_packet->ETHER.ether_dstMAC, sender_MAC, 6);
 
                         pcap_sendpacket(pcap, relay_buf, header->caplen);
-                        printf("Sent relay packet: target -> me -> sender");
+                        printf("Sent relay packet: target -> me -> sender \n");
                         
                     }
             }
